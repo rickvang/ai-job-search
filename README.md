@@ -208,6 +208,7 @@ ai-job-search/
 ├── salary_lookup.py                   # Salary benchmarking tool (BYO data)
 ├── tools/
 │   ├── convert_salary_excel.py        # Convert salary Excel to JSON
+│   ├── job_ledger.py                   # Durable private seen_jobs identity/update helpers
 │   ├── lint_skills.py                 # CI lint for skills, commands, settings.json
 │   ├── security_guards.py             # CI guards: permission allowlist, gitignore rules, manifests
 │   └── README_SALARY_TOOL.md          # Salary tool setup instructions
