@@ -31,7 +31,6 @@ Optional arguments:
 - A focus area, e.g. "/scrape data science" or "/scrape geophysics"
 - "broad" to run all search categories, e.g. "/scrape broad"
 - "health" to run the portal health check only (Step 4.75), without searching, deduplicating, or presenting jobs - e.g. "/scrape health", or "/scrape health jobnet" to probe one portal even if disabled
-- "resurface" to deliberately show known postings confirmed as reposted or materially refreshed; ordinary runs keep known postings out of the new-results list
 
 ---
 
@@ -39,13 +38,9 @@ Optional arguments:
 
 ### Step 0: Load State
 
-1. Read `job_scraper/seen_jobs.json` (create if missing - start with `{"seen": {}}`). Treat the file as a private durable ledger; never add a real user's ledger to Git.
+1. Read `job_scraper/seen_jobs.json` (create if missing - start with `{"seen": {}}`)
 2. Read `job_search_tracker.csv` to extract already-applied companies+roles
 3. Read `search-queries.md` (this directory) for the search strategy
-
-The ledger's identity/update contract is also covered by the stdlib reference
-implementation in `tools/job_ledger.py` and its synthetic tests. Keep the
-workflow behavior below aligned with that contract when handling live results.
 
 ### Step 1: Search
 
@@ -101,13 +96,7 @@ command (see its SKILL.md — do not guess flags) to extract **key requirements*
 fields manually.
 
 For every candidate:
-- Normalize identity before deciding whether the result is new. Use the strongest available evidence in this order:
-  1. portal/source name plus the portal's stable job ID (`id`, `job_id`, or the portal-documented equivalent)
-  2. a normalized canonical URL (lowercase scheme/host, remove the fragment and trailing slash, retain functional query parameters, sort query parameters, and remove only well-known tracking keys such as `utm_*`, `gclid`, `fbclid`, and `msclkid`)
-  3. a conservative fingerprint of normalized company + title + location, retaining all words and role/location qualifiers
-- Build new keys as `source:<source>:<id>`, `url:<canonical-url>`, or `fingerprint:<company>|<title>|<location>` according to the first available identity. Read old keys as-is and match their stored URL, portal/ID, or legacy company/title/location fields before creating a new key.
-- If a stronger identity is present but does not match an existing record, do not merge a different job merely because its fallback fingerprint matches. A canonical URL may match a legacy record that predates stored source IDs.
-- Skip a result from the presented new-results list when its identity already exists in `seen_jobs.json`; the observation is still merged in Step 4.
+- Skip if the URL or company+title combo already exists in `seen_jobs.json`
 - Skip if the company+role already appears in `job_search_tracker.csv`
 
 ### Step 2.5: Mass-Posting Detection (within this run)
@@ -126,28 +115,18 @@ For each new job, do a rapid fit check (NOT the full evaluation from `04-job-eva
 
 ### Step 4: Deduplicate & Store
 
-1. Add ALL fetched jobs (new and skipped) to `seen_jobs.json`. New records use the existing fields plus these additive fields:
+1. Add ALL fetched jobs (new and skipped) to `seen_jobs.json` with structure:
 ```json
 {
   "seen": {
-    "<durable_identity_key>": {
+    "<url_or_company_title_key>": {
       "title": "...",
       "company": "...",
       "url": "...",
       "first_seen": "YYYY-MM-DD",
-      "last_seen": "YYYY-MM-DD",
-      "observation_count": 1,
       "fit": "high/medium/low",
       "status": "new/skipped/evaluated/ranked/expired",
-      "portal": "<source portal skill, e.g. jobindex-search>",
-      "identity": {
-        "source": "<normalized portal/source>",
-        "source_id": "<normalized stable source ID>",
-        "canonical_url": "<normalized URL>",
-        "fingerprint": "<normalized company>|<title>|<location>"
-      },
-      "material_fingerprint": "<opaque fingerprint of observed posting fields>",
-      "material_fields": ["company", "title", "location"]
+      "portal": "<source portal skill, e.g. jobindex-search>"
     }
   }
 }
@@ -155,12 +134,9 @@ For each new job, do a rapid fit check (NOT the full evaluation from `04-job-eva
 
 The `portal` field records which CLI skill produced the job (results are already tagged per portal in Step 1b - persist that tag here). Entries written before this field existed lack it; the health check (Step 4.75) attributes those by matching the URL's domain against each portal's base URL, so do not backfill.
 
-2. For every observation, preserve the record's original `first_seen`, set `last_seen` to the observation date, increment `observation_count`, and update only fields present in the latest observation. Preserve `portal`, `identity`, `material_*`, and all existing rank fields when re-writing. Add missing identity/observation fields to legacy entries without restructuring or renaming their existing keys.
-3. A known job is not new merely because a later search returns `status: "new"`. Preserve a stored `rejected`, `applied`, `expired`, or other non-new disposition by default; an explicit disposition update may change it. These records remain queryable by status and identity.
-4. If the user supplied `resurface` or explicitly confirms that a known posting is a repost/material refresh, compare the material fingerprint. When the observation should be surfaced, create one new version with `repost_of` set to the prior key and `status: "new"`; retain the prior record and its disposition. Repeated observations of the same surfaced version update that version's `last_seen` instead of creating another record. Without that deliberate resurface instruction, merge the observation into the known record and do not present it as new.
-5. `/rank` extends this schema additively: ranked entries also carry `rank_score` (0–100 overall score), `rank_verdict` (fit band, e.g. "strong fit"), and `rank_date` (ISO date of ranking). The `status` field is set to `"ranked"`. Do not drop any of these fields when re-writing entries.
+`/rank` extends this schema additively: ranked entries also carry `rank_score` (0–100 overall score), `rank_verdict` (fit band, e.g. "strong fit"), and `rank_date` (ISO date of ranking). The `status` field is set to `"ranked"`. Do not drop any of these fields when re-writing entries.
 
-6. Only present jobs that are new according to the identity/lifecycle rules above and are not in the tracker, plus deliberately surfaced repost/material-refresh versions.
+2. Only present jobs NOT already in the seen list or tracker.
 
 ### Step 4.5: Generate Referral Contact Links (High & Medium Fit Only)
 
@@ -266,4 +242,3 @@ If the user decides to apply to any job, add a row to `job_search_tracker.csv`.
 7. **No automated people lookups.** Referral contacts (Step 4.5) are LinkedIn search links only - never fetch or scrape LinkedIn people-search result pages programmatically.
 8. **Health checks are bounded and honest.** Step 4.75 spends at most one probe, one retry, and (in `health` mode) one detail fetch per portal - a diagnosis, not a crawl. A rate-limit is never evidence of breakage. Health verdicts come only from observed CLI output; a portal that could not be tested is reported as inconclusive, never guessed. The `enabled` toggle is the only thing the health check may edit, and only with confirmation.
 9. **Flag distribution patterns, never accuse.** The mass-posting signal (Step 2.5) describes how a listing is being distributed, not a claim that the employer is a scam. Never name a company as fraudulent or untrustworthy - present the observation and let the user decide.
-10. **Identity and lifecycle are additive.** Strong identity wins over a fallback fingerprint; tracking-only URL changes do not create a record; repeat observations update `last_seen`; closed records stay queryable and out of default-new results; deliberate repost/material-refresh surfacing retains the prior record.
