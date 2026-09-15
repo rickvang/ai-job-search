@@ -235,6 +235,10 @@ def _entry_identity(entry: Mapping[str, Any]) -> dict[str, str]:
     return {key: value for key, value in result.items() if value}
 
 
+def _has_strong_identity(identity: Mapping[str, str]) -> bool:
+    return bool(identity.get("source") and identity.get("source_id"))
+
+
 def _find_match(ledger: Mapping[str, Any], identity: Mapping[str, str]) -> str | None:
     seen = ledger.get("seen", {})
     if not isinstance(seen, Mapping):
@@ -244,7 +248,7 @@ def _find_match(ledger: Mapping[str, Any], identity: Mapping[str, str]) -> str |
     # fingerprint: two distinct roles can share a company/title/location.
     # Canonical URL remains a compatibility fallback for a legacy entry that
     # predates stored source IDs.
-    if identity.get("source") and identity.get("source_id"):
+    if _has_strong_identity(identity):
         comparisons = (("source", "source_id"), ("canonical_url",))
     elif identity.get("canonical_url"):
         comparisons = (("canonical_url",),)
@@ -257,9 +261,37 @@ def _find_match(ledger: Mapping[str, Any], identity: Mapping[str, str]) -> str |
             if not isinstance(entry, Mapping):
                 continue
             existing = _entry_identity(entry)
+            if fields == ("canonical_url",) and _has_strong_identity(existing):
+                # A landing URL can be shared by distinct source IDs. URL
+                # fallback is only for legacy records that predate IDs.
+                continue
             if all(existing.get(field) == identity.get(field) for field in fields):
                 return str(key)
     return None
+
+
+def _active_repost_key(seen: Mapping[str, Any], matched_key: str) -> str:
+    """Follow the latest deliberate repost version for ordinary observations."""
+
+    current = matched_key
+    visited: set[str] = set()
+    while current not in visited:
+        visited.add(current)
+        children: list[tuple[int, str, Mapping[str, Any]]] = []
+        for order, (key, entry) in enumerate(seen.items()):
+            if isinstance(entry, Mapping) and entry.get("repost_of") == current:
+                children.append((order, str(key), entry))
+        if not children:
+            return current
+        _, current, _ = max(
+            children,
+            key=lambda item: (
+                _string(item[2].get("last_seen")),
+                _string(item[2].get("first_seen")),
+                item[0],
+            ),
+        )
+    return current
 
 
 def _set_identity(entry: dict[str, Any], identity: Mapping[str, str]) -> None:
@@ -314,7 +346,7 @@ class ObservationResult:
 
     @property
     def is_new_candidate(self) -> bool:
-        return _status(self.status) == "new"
+        return self.created and _status(self.status) == "new"
 
 
 def observe(
@@ -350,6 +382,8 @@ def observe(
         seen[key] = _new_entry(observation, identity, day)
         return ObservationResult(key, True, False, False, _string(seen[key]["status"]))
 
+    if not surface_repost:
+        matched_key = _active_repost_key(seen, matched_key)
     existing = seen[matched_key]
     if not isinstance(existing, dict):
         raise ValueError(f"ledger entry {matched_key!r} must be an object")

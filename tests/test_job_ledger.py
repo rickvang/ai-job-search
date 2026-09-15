@@ -77,6 +77,31 @@ class JobLedgerIdentityTests(unittest.TestCase):
         self.assertEqual(first_result.key, second_result.key)
         self.assertEqual(len(ledger["seen"]), 1)
 
+    def test_distinct_strong_source_ids_do_not_collide_on_one_landing_url(self):
+        ledger = {"seen": {}}
+        shared = {
+            "source": "example portal",
+            "url": "https://jobs.example.test/search/platform-engineer",
+            "title": "Platform Engineer",
+            "company": "Acme",
+            "location": "Copenhagen",
+        }
+
+        first = observe(ledger, {**shared, "source_id": "job-1"}, observed_on="2026-09-10")
+        second = observe(ledger, {**shared, "source_id": "job-2"}, observed_on="2026-09-10")
+        repeat_first = observe(
+            ledger,
+            {**shared, "source_id": "job-1"},
+            observed_on="2026-09-11",
+        )
+
+        self.assertTrue(first.created)
+        self.assertTrue(second.created)
+        self.assertNotEqual(first.key, second.key)
+        self.assertEqual(repeat_first.key, first.key)
+        self.assertEqual(ledger["seen"][first.key]["observation_count"], 2)
+        self.assertEqual(ledger["seen"][second.key]["observation_count"], 1)
+
     def test_fingerprint_is_conservative_fallback(self):
         first = {
             "company": "Acme, Inc.",
@@ -194,6 +219,36 @@ class JobLedgerLifecycleTests(unittest.TestCase):
         self.assertEqual(ledger["seen"][original_result.key]["status"], "rejected")
         self.assertEqual(ledger["seen"][repost_result.key]["repost_of"], original_result.key)
         self.assertEqual(len(query_jobs(ledger, new_only=True)), 1)
+
+        ordinary_result = observe(
+            ledger,
+            {**repost, "status": "new"},
+            observed_on="2026-09-16",
+        )
+        self.assertEqual(ordinary_result.key, repost_result.key)
+        self.assertFalse(ordinary_result.created)
+        self.assertFalse(ordinary_result.is_new_candidate)
+        self.assertEqual(ledger["seen"][repost_result.key]["last_seen"], "2026-09-16")
+        self.assertEqual(ledger["seen"][original_result.key]["last_seen"], "2026-08-01")
+
+    def test_is_new_candidate_requires_creation_even_when_status_is_new(self):
+        ledger = {"seen": {}}
+        observation = {
+            "source": "example",
+            "source_id": "42",
+            "title": "Platform Engineer",
+            "company": "Acme",
+            "location": "Copenhagen",
+            "status": "new",
+        }
+
+        first = observe(ledger, observation, observed_on="2026-09-14")
+        repeat = observe(ledger, observation, observed_on="2026-09-15")
+
+        self.assertTrue(first.created)
+        self.assertTrue(first.is_new_candidate)
+        self.assertFalse(repeat.created)
+        self.assertFalse(repeat.is_new_candidate)
 
 
 class JobLedgerCompatibilityTests(unittest.TestCase):
